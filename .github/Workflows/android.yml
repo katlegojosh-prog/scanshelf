@@ -1,0 +1,22 @@
+name: Build Android APK
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { java-version: 17, distribution: 'temurin' }
+      - run: |
+          cd frontend
+          npm install
+          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npx cap init ScanShelf com.scanshelf.app --web-dir=dist || true
+          npx cap add android || true
+          npm run build
+          npx cap sync
+          cd android && chmod +x gradlew && ./gradlew assembleDebug
+      - uses: actions/upload-artifact@v4
+        with: { name: scanshelf-apk, path: frontend/android/app/build/outputs/apk/debug/app-debug.apk }
