@@ -1,31 +1,94 @@
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+name: Build Android APK + AAB
 
-    <application
-        android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:supportsRtl="true"
-        android:theme="@style/AppTheme">
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-        <activity
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
-            android:name="com.scanshelf.app.MainActivity"
-            android:label="@string/title_activity_main"
-            android:theme="@style/AppTheme.NoActionBarLaunch"
-            android:launchMode="singleTask"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-    </application>
+permissions:
+  contents: read
 
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-</manifest>
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: 17
+          distribution: temurin
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Verify manifest template exists
+        run: |
+          test -f frontend/android-manifest-template.xml || (echo "MISSING: frontend/android-manifest-template.xml — create it on GitHub before re-running" && exit 1)
+          echo "Manifest template present ✓"
+
+      - name: Build Web + Capacitor + APK
+        env:
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        run: |
+          set -e
+          if [ -z "$VITE_API_URL" ]; then
+            echo "MISSING: VITE_API_URL secret — set it in Repo Settings → Secrets → Actions"
+            exit 1
+          fi
+          echo "Building with VITE_API_URL=$VITE_API_URL"
+
+          cd frontend
+          npm install --no-audit --no-fund
+
+          echo "── Vite build ──"
+          npm run build
+          test -d dist || (echo "dist/ missing — vite build failed" && exit 1)
+          echo "dist/ present ✓"
+
+          echo "── Capacitor: fresh android project ──"
+          rm -rf android
+          npx cap add android
+
+          echo "── Applying custom AndroidManifest ──"
+          cp android-manifest-template.xml android/app/src/main/AndroidManifest.xml
+          grep -q "android.permission.CAMERA" android/app/src/main/AndroidManifest.xml || (echo "CAMERA permission missing from applied manifest" && exit 1)
+          echo "CAMERA permission present in applied manifest ✓"
+
+          echo "── Capacitor sync ──"
+          npx cap sync
+
+          echo "── Gradle: assembleDebug ──"
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --stacktrace
+
+          echo "── Gradle: bundleRelease (optional, may skip if unsigned) ──"
+          ./gradlew bundleRelease --stacktrace || true
+
+      - name: Upload Debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanshelf-apk-debug
+          path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Release AAB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanshelf-aab-release
+          path: frontend/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: ignore
+          retention-days: 14
